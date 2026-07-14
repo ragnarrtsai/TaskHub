@@ -540,6 +540,53 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true });
   }
 
+  // Chrome 擴充套件送來的 ChatGPT 生成圖片：{dir, label, title, images: [{b64, contentType}]}
+  // 圖片由 extension 抓好轉 base64（簽名 URL 會過期，且可能需要瀏覽器 cookie），這裡只負責落地。
+  if (req.method === 'POST' && url.pathname === '/images') {
+    let ev;
+    try {
+      ev = JSON.parse(await readBody(req));
+    } catch {
+      return json(res, 400, { error: 'invalid JSON' });
+    }
+    if (!ev.dir || !path.isAbsolute(ev.dir) || !Array.isArray(ev.images) || !ev.images.length) {
+      return json(res, 400, { error: 'dir (absolute path) and images required' });
+    }
+    const EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
+    // 檔名：對話標題_日期時間（多張加序號），標題裡的路徑危險字元換掉
+    const base = String(ev.title || 'chatgpt')
+      .replace(/[/\\:*?"<>|]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 50) || 'chatgpt';
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    const saved = [];
+    try {
+      await fs.promises.mkdir(ev.dir, { recursive: true });
+      for (let i = 0; i < ev.images.length; i++) {
+        const img = ev.images[i];
+        if (!img || !img.b64) continue;
+        const ext = EXT[String(img.contentType || '').split(';')[0].trim()] || '.png';
+        const seq = ev.images.length > 1 ? `_${pad(i + 1)}` : '';
+        let file = path.join(ev.dir, `${base}_${stamp}${seq}${ext}`);
+        for (let n = 2; fs.existsSync(file); n++) {
+          file = path.join(ev.dir, `${base}_${stamp}${seq}-${n}${ext}`);
+        }
+        await fs.promises.writeFile(file, Buffer.from(img.b64, 'base64'));
+        saved.push(file);
+      }
+    } catch (e) {
+      notify(`⚠️ 圖片儲存失敗 — ${ev.label || 'ChatGPT'}`, String(e.message || e).slice(0, 100), 'Basso');
+      return json(res, 500, { error: String(e.message || e), saved });
+    }
+    if (saved.length) {
+      notify(`🖼️ 圖片已儲存 — ${ev.label || 'ChatGPT'}`, `${saved.length} 張 → ${ev.dir}`, 'Glass');
+    }
+    return json(res, 200, { ok: true, saved });
+  }
+
   // Claude Code hooks 專用：直接吃 hook stdin 的原始 JSON
   if (req.method === 'POST' && url.pathname === '/claude-hook') {
     let hook;

@@ -66,6 +66,7 @@ function detect() {
 
 let reported = 'idle'; // 已回報給 Hub 的狀態
 let pending = null;    // 待確認的新狀態（要連續兩次相同才算數）
+const sentImages = new Set(); // 這個分頁已送出下載的圖片（以去掉簽名參數的 URL 為 key）
 
 function getModel() {
   const hit = q(MODEL_SELECTORS);
@@ -84,6 +85,33 @@ function send(status) {
   chrome.runtime.sendMessage({ type: 'status', status, model: getModel(), title: getConvTitle() }).catch(() => {});
 }
 
+// ---- 圖片自動下載（方案 B：抓 URL 交給 background → Hub 落地）----
+// 只掃「最後一則 assistant 回覆」，歷史訊息的舊圖不會被撈到；
+// 同一張圖以去掉 query 的 URL 去重，done 訊號閃兩次也只送一次。
+function collectNewImages() {
+  const msgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
+  if (!msgs.length) return [];
+  const last = msgs[msgs.length - 1];
+  const urls = [];
+  for (const img of last.querySelectorAll('img[src*="oaiusercontent"]')) {
+    const key = img.src.split('?')[0];
+    if (!img.src.startsWith('https://') || sentImages.has(key)) continue;
+    sentImages.add(key);
+    urls.push(img.src);
+  }
+  return urls;
+}
+
+function harvestImages() {
+  // 生成剛結束時 img 的 src 可能還在從漸進預覽換成最終圖，緩 2.5 秒再抓
+  setTimeout(() => {
+    const urls = collectNewImages();
+    if (!urls.length) return;
+    log('偵測到', urls.length, '張新圖片，送出下載');
+    chrome.runtime.sendMessage({ type: 'images', urls, title: getConvTitle() }).catch(() => {});
+  }, 2500);
+}
+
 setInterval(() => {
   const { state, why } = detect();
   if (state === reported) { pending = null; return; }
@@ -94,6 +122,7 @@ setInterval(() => {
     const status = state === 'running' ? 'running' : 'done';
     log('狀態轉換 →', status, '｜依據:', why, '｜圖片數:', q(SELECTORS.resultImage) ? '有結果圖' : '無');
     send(status);
+    if (status === 'done') harvestImages();
   } else {
     pending = state;
     log('候選狀態:', state, '｜依據:', why, '（等下一輪確認）');

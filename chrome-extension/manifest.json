@@ -1,10 +1,13 @@
 {
   "manifest_version": 3,
   "name": "AI Task Hub — ChatGPT Monitor",
-  "description": "偵測 ChatGPT 圖片生成狀態，回報給本機 AI Task Hub (localhost:9999)",
-  "version": "0.1.0",
+  "description": "偵測 ChatGPT 圖片生成狀態，回報給本機 AI Task Hub (localhost:9999)，並自動下載生成圖片",
+  "version": "0.2.0",
   "permissions": ["storage"],
-  "host_permissions": ["http://localhost:9999/*"],
+  "host_permissions": [
+    "http://localhost:9999/*",
+    "https://*.oaiusercontent.com/*"
+  ],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
     {
