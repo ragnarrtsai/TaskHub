@@ -46,15 +46,20 @@ async function fetchAsBase64(url) {
   return { b64: btoa(bin), contentType };
 }
 
-async function downloadImages(urls, title) {
+// items: [{b64, contentType}]（blob: 圖，content script 已轉好）或 [{url}]（https 圖，這裡抓）
+async function downloadImages(items, title) {
   const { profileName, saveDir } = await getSettings();
   if (!saveDir) return; // 沒設定儲存位置 = 功能關閉
   const images = [];
-  for (const url of urls) {
+  for (const item of items) {
+    if (item.b64) {
+      images.push({ b64: item.b64, contentType: item.contentType });
+      continue;
+    }
     try {
-      images.push(await fetchAsBase64(url));
+      images.push(await fetchAsBase64(item.url));
     } catch (e) {
-      console.warn('[task-hub] 圖片抓取失敗，略過：', url, e);
+      console.warn('[task-hub] 圖片抓取失敗，略過：', item.url, e);
     }
   }
   if (images.length) {
@@ -64,8 +69,8 @@ async function downloadImages(urls, title) {
 
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || !sender.tab) return;
-  if (msg.type === 'images' && Array.isArray(msg.urls) && msg.urls.length) {
-    downloadImages(msg.urls, msg.title);
+  if (msg.type === 'images' && Array.isArray(msg.items) && msg.items.length) {
+    downloadImages(msg.items, msg.title);
     return;
   }
   if (msg.type !== 'status') return;

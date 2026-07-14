@@ -82,7 +82,7 @@ tail -f ~/projects/task-hub/hub.log
 | `GET /health` | 健康檢查 |
 | `POST /claude-hook` | Claude Code hooks 專用，直接吃 hook 的原始 stdin JSON |
 | `POST /events` | 通用入口 `{source, id, label, status}`，status 可為 `running`/`waiting`/`done`/`ended`（ended = 移除任務），給 Chrome 擴充套件等其他來源用 |
-| `POST /images` | 接收 Chrome 擴充套件送來的 ChatGPT 生成圖片 `{dir, label, title, images: [{b64, contentType}]}`，寫入 `dir`（必須是絕對路徑，不存在會自動建立）並發「🖼️ 圖片已儲存」通知。檔名 = `對話標題_日期時間[_序號].副檔名`，撞名自動加流水號 |
+| `POST /images` | 接收 Chrome 擴充套件送來的 ChatGPT 生成圖片 `{dir, label, title, images: [{b64, contentType}]}`，寫入 `dir`（絕對路徑，`~`/`~/` 開頭會展開成家目錄；不存在會自動建立）並發「🖼️ 圖片已儲存」通知。檔名 = `對話標題_日期時間[_序號].副檔名`，撞名自動加流水號 |
 
 ---
 
@@ -188,23 +188,29 @@ fetch localhost，會撞 CORS／Local Network Access 限制）。
 
 ### 圖片自動下載
 
-在「擴充功能選項」設定**儲存資料夾（絕對路徑）**後啟用；留空 = 關閉。流程：
+在「擴充功能選項」設定**儲存資料夾**（`/` 或 `~/` 開頭，選項頁儲存時會驗證格式）後啟用；留空 = 關閉。流程：
 
 ```
 content script（done 瞬間 +2.5s）             background                    Hub
-  最後一則 assistant 訊息裡的            ──▶  逐張 fetch 成 base64   ──▶  POST /images
-  img[src*="oaiusercontent"]（可多張）        （帶瀏覽器 cookie）          寫檔＋🖼️ 通知
+  最後一則 assistant 訊息裡的圖片        ──▶  湊齊 base64            ──▶  POST /images
+  blob: → 頁面內轉 base64                    （https 的在這裡抓，          寫檔＋🖼️ 通知
+  https(oaiusercontent) → 送 URL              帶瀏覽器 cookie）
 ```
 
 設計要點：
 
-- **只掃最後一則 assistant 回覆**，歷史訊息的舊圖不會被誤下載；同張圖以
-  去掉簽名參數的 URL 去重，done 訊號抖動也只送一次
+- **只掃最後一則 assistant 回覆**（找不到 `data-message-author-role` 時退回最後一個
+  `article` turn），歷史訊息的舊圖不會被誤下載；同張圖去重（https 以去掉簽名參數的
+  URL 為 key），done 訊號抖動也只送一次；**寬度 < 200px 的小圖（頭像/icon）跳過**
+- **產圖當下的 `src` 常是 `blob:`**（重整頁面後才變 `oaiusercontent` 正式網址），
+  blob 只有頁面 context 讀得到 → content script 直接轉 base64；https 的則由
+  **background 抓**（簽名 URL 會過期、可能需要 cookie；`host_permissions` 已放行
+  `*.oaiusercontent.com`）
 - done 後**延遲 2.5 秒**再抓：產圖結尾 `img` 的 `src` 還在從漸進式預覽換成最終圖
-- 由 **background 抓圖**（不是 Hub）：簽名 URL 會過期、部分圖需要登入 cookie；
-  manifest 的 `host_permissions` 已放行 `*.oaiusercontent.com`
 - 因設定是 per-profile 的，**不同 ChatGPT 帳號可以各存到不同資料夾**
 - Hub 沒開時靜默放棄（與狀態回報一致），不影響瀏覽
+- 除錯：頁面 Console 看 `[task-hub] 抓圖：…` log；background 的錯誤在
+  `chrome://extensions` → 服務工作處理程序的 Console
 
 改了 `chrome-extension/` 底下的程式碼後，要到 `chrome://extensions`
 按套件卡片的 ↻ 重載、再重整 chatgpt.com 分頁才會生效。
@@ -217,7 +223,7 @@ content script（done 瞬間 +2.5s）             background                    
 1. 該 profile 開 `chrome://extensions` → 右上開「開發人員模式」
 2. 「載入未封裝項目」→ 選 `~/projects/task-hub/chrome-extension` 資料夾
 3. 點擴充套件的「詳細資料 → 擴充功能選項」，幫這個 profile 取名（如「帳號A」）；
-   要用圖片自動下載的話，順便填**儲存資料夾**（絕對路徑）→ 儲存
+   要用圖片自動下載的話，順便填**儲存資料夾**（如 `~/Desktop/chatgpt-images`）→ 儲存
 4. 開 chatgpt.com 產一張圖驗證；DevTools Console 會有 `[task-hub]` 開頭的偵測記錄
 
 ### 改版維修

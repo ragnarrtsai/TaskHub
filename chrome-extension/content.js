@@ -81,38 +81,87 @@ function getConvTitle() {
   return t && t !== 'ChatGPT' ? t.slice(0, 60) : undefined;
 }
 
+// 擴充套件重載後，舊的 content script 會變成孤兒：chrome.runtime 消失，
+// 再呼叫 sendMessage 就丟 TypeError。偵測到就停掉輪詢、安靜退場。
+const alive = () => typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.id;
+
 function send(status) {
+  if (!alive()) return;
   chrome.runtime.sendMessage({ type: 'status', status, model: getModel(), title: getConvTitle() }).catch(() => {});
 }
 
-// ---- 圖片自動下載（方案 B：抓 URL 交給 background → Hub 落地）----
-// 只掃「最後一則 assistant 回覆」，歷史訊息的舊圖不會被撈到；
-// 同一張圖以去掉 query 的 URL 去重，done 訊號閃兩次也只送一次。
-function collectNewImages() {
+// ---- 圖片自動下載（方案 B：抓圖交給 background → Hub 落地）----
+// 只掃「最後一則 assistant 回覆」（找不到就退回最後一個對話 turn），
+// 歷史訊息的舊圖不會被撈到；同一張圖去重，done 訊號閃兩次也只送一次。
+// 生成當下 img 的 src 常是 blob:（重新整理後才會變成 oaiusercontent 的正式網址），
+// blob: 只有頁面自己讀得到，所以在這裡直接轉 base64；https 的交給 background 抓。
+function lastAssistantScope() {
   const msgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
-  if (!msgs.length) return [];
-  const last = msgs[msgs.length - 1];
-  const urls = [];
-  for (const img of last.querySelectorAll('img[src*="oaiusercontent"]')) {
-    const key = img.src.split('?')[0];
-    if (!img.src.startsWith('https://') || sentImages.has(key)) continue;
+  if (msgs.length) return msgs[msgs.length - 1];
+  const turns = document.querySelectorAll('article[data-testid*="conversation-turn"], article');
+  return turns.length ? turns[turns.length - 1] : null;
+}
+
+function collectNewImages() {
+  const scope = lastAssistantScope();
+  if (!scope) { log('抓圖：找不到 assistant 訊息容器'); return []; }
+  const srcs = [];
+  for (const img of scope.querySelectorAll('img')) {
+    const src = img.src || '';
+    const isBlob = src.startsWith('blob:');
+    const isRemote = src.startsWith('https://') && src.includes('oaiusercontent');
+    if (!isBlob && !isRemote) continue;
+    // 避開頭像、icon 之類的小圖
+    if (Math.max(img.naturalWidth, img.clientWidth) < 200) continue;
+    const key = isBlob ? src : src.split('?')[0];
+    if (sentImages.has(key)) continue;
     sentImages.add(key);
-    urls.push(img.src);
+    srcs.push(src);
   }
-  return urls;
+  return srcs;
+}
+
+async function blobToB64(url) {
+  const blob = await (await fetch(url)).blob();
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return { b64: btoa(bin), contentType: blob.type || 'image/png' };
 }
 
 function harvestImages() {
   // 生成剛結束時 img 的 src 可能還在從漸進預覽換成最終圖，緩 2.5 秒再抓
-  setTimeout(() => {
-    const urls = collectNewImages();
-    if (!urls.length) return;
-    log('偵測到', urls.length, '張新圖片，送出下載');
-    chrome.runtime.sendMessage({ type: 'images', urls, title: getConvTitle() }).catch(() => {});
+  setTimeout(async () => {
+    const srcs = collectNewImages();
+    if (!srcs.length) { log('抓圖：最後一則回覆沒有符合條件的圖片'); return; }
+    const items = [];
+    for (const src of srcs) {
+      if (src.startsWith('blob:')) {
+        try {
+          items.push(await blobToB64(src));
+        } catch (e) {
+          log('抓圖：blob 讀取失敗', src, e);
+        }
+      } else {
+        items.push({ url: src });
+      }
+    }
+    if (!items.length || !alive()) return;
+    log('偵測到', items.length, '張新圖片，送出下載');
+    chrome.runtime.sendMessage({ type: 'images', items, title: getConvTitle() }).catch(() => {});
   }, 2500);
 }
 
-setInterval(() => {
+const poller = setInterval(() => {
+  if (!alive()) {
+    // 套件被重載，這份是孤兒了：停止輪詢（新版 script 會隨分頁重整注入）
+    clearInterval(poller);
+    log('extension 已重載，此舊 script 停止輪詢（重整分頁即換新版）');
+    return;
+  }
   const { state, why } = detect();
   if (state === reported) { pending = null; return; }
   if (pending === state) {

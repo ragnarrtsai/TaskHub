@@ -18,9 +18,9 @@
 <label for="name">這個 Chrome profile 的名稱（會顯示在通知上）</label>
 <input id="name" placeholder="例如：帳號A">
 <p class="hint">擴充套件是 per-profile 的：每個登入不同 ChatGPT 帳號的 profile 各裝一次、各取一個名字，通知就能分辨是哪個帳號的任務。</p>
-<label for="dir" style="margin-top:1.2rem">圖片自動下載的儲存資料夾（絕對路徑）</label>
-<input id="dir" placeholder="例如：/Users/daniel/Desktop/chatgpt-images">
-<p class="hint">留空 = 關閉自動下載。ChatGPT 生成圖片完成時，會把「最後一則回覆的所有圖片」經本機 Hub 存到這個資料夾（資料夾不存在會自動建立）。Hub 沒開的時候不會下載。</p>
+<label for="dir" style="margin-top:1.2rem">圖片自動下載的儲存資料夾</label>
+<input id="dir" placeholder="例如：~/Desktop/chatgpt-images">
+<p class="hint">留空 = 關閉自動下載。以 <code>/</code> 開頭的完整路徑或 <code>~/</code> 開頭（= 家目錄）皆可。ChatGPT 生成圖片完成時，會把「最後一則回覆的所有圖片」經本機 Hub 存到這個資料夾（資料夾不存在會自動建立）。Hub 沒開的時候不會下載。</p>
 <button id="save">儲存</button><span id="saved"></span>
 <script src="options.js"></script>
 </body>

@@ -549,8 +549,11 @@ const server = http.createServer(async (req, res) => {
     } catch {
       return json(res, 400, { error: 'invalid JSON' });
     }
-    if (!ev.dir || !path.isAbsolute(ev.dir) || !Array.isArray(ev.images) || !ev.images.length) {
-      return json(res, 400, { error: 'dir (absolute path) and images required' });
+    // ~ 開頭展開成家目錄，其餘仍要求絕對路徑
+    let dir = String(ev.dir || '');
+    if (dir === '~' || dir.startsWith('~/')) dir = path.join(require('os').homedir(), dir.slice(2));
+    if (!dir || !path.isAbsolute(dir) || !Array.isArray(ev.images) || !ev.images.length) {
+      return json(res, 400, { error: 'dir (absolute or ~/ path) and images required' });
     }
     const EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
     // 檔名：對話標題_日期時間（多張加序號），標題裡的路徑危險字元換掉
@@ -564,15 +567,15 @@ const server = http.createServer(async (req, res) => {
     const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     const saved = [];
     try {
-      await fs.promises.mkdir(ev.dir, { recursive: true });
+      await fs.promises.mkdir(dir, { recursive: true });
       for (let i = 0; i < ev.images.length; i++) {
         const img = ev.images[i];
         if (!img || !img.b64) continue;
         const ext = EXT[String(img.contentType || '').split(';')[0].trim()] || '.png';
         const seq = ev.images.length > 1 ? `_${pad(i + 1)}` : '';
-        let file = path.join(ev.dir, `${base}_${stamp}${seq}${ext}`);
+        let file = path.join(dir, `${base}_${stamp}${seq}${ext}`);
         for (let n = 2; fs.existsSync(file); n++) {
-          file = path.join(ev.dir, `${base}_${stamp}${seq}-${n}${ext}`);
+          file = path.join(dir, `${base}_${stamp}${seq}-${n}${ext}`);
         }
         await fs.promises.writeFile(file, Buffer.from(img.b64, 'base64'));
         saved.push(file);
@@ -582,7 +585,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 500, { error: String(e.message || e), saved });
     }
     if (saved.length) {
-      notify(`🖼️ 圖片已儲存 — ${ev.label || 'ChatGPT'}`, `${saved.length} 張 → ${ev.dir}`, 'Glass');
+      notify(`🖼️ 圖片已儲存 — ${ev.label || 'ChatGPT'}`, `${saved.length} 張 → ${dir}`, 'Glass');
     }
     return json(res, 200, { ok: true, saved });
   }
