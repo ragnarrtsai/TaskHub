@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>AI Task Hub — 設定</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "PingFang TC", sans-serif; max-width: 420px; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin-bottom: .4rem; font-weight: 600; }
+  input { width: 100%; padding: .5rem; font-size: 1rem; box-sizing: border-box; }
+  button { margin-top: .8rem; padding: .5rem 1.2rem; font-size: 1rem; }
+  #saved { margin-left: .6rem; color: green; }
+  p.hint { font-size: .85rem; opacity: .6; }
+</style>
+</head>
+<body>
+<h2>AI Task Hub — profile 識別名稱</h2>
+<label for="name">這個 Chrome profile 的名稱（會顯示在通知上）</label>
+<input id="name" placeholder="例如：帳號A">
+<button id="save">儲存</button><span id="saved"></span>
+<p class="hint">擴充套件是 per-profile 的：每個登入不同 ChatGPT 帳號的 profile 各裝一次、各取一個名字，通知就能分辨是哪個帳號的任務。</p>
+<script src="options.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# 執行期資料（Hub 落地的任務狀態，內含各 session 的 prompt/回應摘要）
+state.json
+hub.log
+
+# macOS
+.DS_Store
