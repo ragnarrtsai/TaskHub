@@ -1,8 +1,12 @@
-# AI Task Hub — 安裝與使用教學
+# AI Task Hub
 
 集中監控多個 AI 任務（Claude Code session、ChatGPT 產圖），狀態變成
 「🟡 待決定」或「🟢 已完成」時主動發 macOS 通知，不必切視窗輪詢。
-專案規劃見 [ai-task-hub-brief.md](ai-task-hub-brief.md)。
+**架構：單檔 Node Hub（localhost:9999）+ Claude Code hooks + Chrome MV3 擴充套件。**
+
+> 👉 只想知道怎麼用？請看 **[OVERVIEW.md](OVERVIEW.md)（白話使用手冊）**。
+> 本檔以下為技術向說明：安裝、hooks 設定、資料來源、除錯。
+> 專案緣起與規劃見 [ai-task-hub-brief.md](ai-task-hub-brief.md)。
 
 ## 架構總覽
 
