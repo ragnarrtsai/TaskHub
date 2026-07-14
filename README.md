@@ -191,27 +191,39 @@ fetch localhost，會撞 CORS／Local Network Access 限制）。
 在「擴充功能選項」設定**儲存資料夾**（`/` 或 `~/` 開頭，選項頁儲存時會驗證格式）後啟用；留空 = 關閉。流程：
 
 ```
-content script（done 瞬間 +2.5s）             background                    Hub
-  掃全頁，基準線之後新出現的大圖         ──▶  湊齊 base64            ──▶  POST /images
-  blob: → 頁面內轉 base64                    （https 的在這裡抓，          寫檔＋🖼️ 通知
-  https(oaiusercontent) → 送 URL              帶瀏覽器 cookie）
+content script（done 後 120s 觀察窗）          background                    Hub
+  每輪掃全頁，基準線之後新出現的大圖，    ──▶  湊齊 base64、           ──▶  POST /images
+  連兩輪 src 穩定才收：                        同批內容去重                  寫檔＋🖼️ 通知
+  blob:/同源 backend 圖 → 頁面內轉 base64     （oaiusercontent 的
+  oaiusercontent → 送 URL                      在這裡帶 cookie 抓）
 ```
+
+圖片來源三種（實測 2026-07，`qualifyingImages()`）：
+
+| src 特徵 | 說明 | 抓取位置 | 去重 key |
+|---|---|---|---|
+| `chatgpt.com/backend-api/estuary/content?id=file_xxx` | **現行主要來源**（專案頁實測）；同源、靠 cookie 授權；同張圖會渲染成多個 img 元素（參數不同） | content script（同源 fetch） | `?id=` 的 file id |
+| `blob:` | 生成當下的暫存網址 | content script（只有頁面讀得到） | 完整 src |
+| `*.oaiusercontent.com` | 舊版 CDN，簽名 URL 會過期 | background（host_permissions 放行、帶 cookie） | 去掉簽名參數的 URL |
 
 設計要點：
 
 - **基準線判定，不依賴訊息容器**（一般對話/專案/Canvas 的 DOM 都不同、常改版）：
-  閒置時持續把頁面上現有的大圖標成「已看過」，done 時掃全頁，新出現的才下載——
-  歷史舊圖、捲動載入、切換對話都不會誤觸；同張圖去重（https 以去掉簽名參數的
-  URL 為 key），done 訊號抖動也只送一次；**寬度 < 200px 的小圖（頭像/icon）跳過**
-- **產圖當下的 `src` 常是 `blob:`**（重整頁面後才變 `oaiusercontent` 正式網址），
-  blob 只有頁面 context 讀得到 → content script 直接轉 base64；https 的則由
-  **background 抓**（簽名 URL 會過期、可能需要 cookie；`host_permissions` 已放行
-  `*.oaiusercontent.com`）
-- done 後**延遲 2.5 秒**再抓：產圖結尾 `img` 的 `src` 還在從漸進式預覽換成最終圖
+  閒置時持續把頁面上現有的大圖標成「已看過」，之後新出現的才下載——歷史舊圖、
+  捲動載入、切換對話都不會誤觸；**寬度 < 200px 的小圖（頭像/icon）跳過**
+- **done 後開 120 秒觀察窗**，不是抓一次就走：偵測對產圖階段可能全盲（停止鈕
+  消失、進度文字改版），done 會提早發、圖片幾十秒後才出現——窗內每輪輪詢掃描，
+  新圖**連續兩輪 src 相同**（漸進式渲染換完）才送出；窗結束仍無圖會把頁面 img
+  概況 dump 到 Console 供調 selector
+- **img 的 src 更換本身是「生成中」信號**（`imageChurn()`，WeakMap 記每個 img
+  元素上一輪的 src）：按鈕/文字特徵失效時靠它把 running 撐住
+- 兩層去重：content script 以來源 key 去重；background 再把同批 base64 內容
+  相同的過濾一次（同張圖多個 img 元素的保險絲）
 - 因設定是 per-profile 的，**不同 ChatGPT 帳號可以各存到不同資料夾**
 - Hub 沒開時靜默放棄（與狀態回報一致），不影響瀏覽
-- 除錯：頁面 Console 看 `[task-hub] 抓圖：…` log；background 的錯誤在
-  `chrome://extensions` → 服務工作處理程序的 Console
+- 除錯一站式：頁面 Console 看 `[task-hub]` log——`抓圖：…` 是掃描過程，
+  `下載結果: …` 是 background 回傳的最終結局（含沒設資料夾、抓取失敗、Hub
+  退件原因）；Hub 端 `hub.log` 也記每筆 `/images` 請求與寫檔結果
 
 改了 `chrome-extension/` 底下的程式碼後，要到 `chrome://extensions`
 按套件卡片的 ↻ 重載、再重整 chatgpt.com 分頁才會生效。
@@ -229,9 +241,15 @@ content script（done 瞬間 +2.5s）             background                    
 
 ### 改版維修
 
-ChatGPT 前端改版導致偵測失效時，只需要調 `content.js` 最上方的
-`SELECTORS` 與 `GEN_TEXT_RE`（打開 Console 看 `[task-hub]` log 找新特徵），
-其他都不用動。`DEBUG` 旗標校準完可改為 `false`。
+ChatGPT 前端改版導致失效時，要調的地方集中在 `content.js`：
+
+- **狀態偵測失效** → 最上方的 `SELECTORS` 與 `GEN_TEXT_RE`（打開 Console 看
+  `[task-hub]` log 找新特徵）。就算都沒中，`imageChurn()` 通常還撐得住產圖的 running
+- **圖片抓不到** → `qualifyingImages()` 的來源判斷。觀察窗結束時 Console 會自動
+  dump 頁面上所有 img 的網址與尺寸，新的來源網址直接從那裡抄（estuary 這個來源
+  當初就是這樣找到的）
+
+`DEBUG` 旗標校準完可改為 `false`。
 
 ## 後續階段
 
