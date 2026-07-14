@@ -552,7 +552,9 @@ const server = http.createServer(async (req, res) => {
     // ~ 開頭展開成家目錄，其餘仍要求絕對路徑
     let dir = String(ev.dir || '');
     if (dir === '~' || dir.startsWith('~/')) dir = path.join(require('os').homedir(), dir.slice(2));
+    console.log(`[task-hub] /images: ${Array.isArray(ev.images) ? ev.images.length : '?'} 張, dir=${ev.dir}, label=${ev.label}, title=${ev.title}`);
     if (!dir || !path.isAbsolute(dir) || !Array.isArray(ev.images) || !ev.images.length) {
+      console.log('[task-hub] /images: 退回（路徑或圖片格式不合）');
       return json(res, 400, { error: 'dir (absolute or ~/ path) and images required' });
     }
     const EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
@@ -581,10 +583,12 @@ const server = http.createServer(async (req, res) => {
         saved.push(file);
       }
     } catch (e) {
+      console.log('[task-hub] /images: 寫檔失敗', e.message || e);
       notify(`⚠️ 圖片儲存失敗 — ${ev.label || 'ChatGPT'}`, String(e.message || e).slice(0, 100), 'Basso');
       return json(res, 500, { error: String(e.message || e), saved });
     }
     if (saved.length) {
+      console.log('[task-hub] /images: 已存', saved.join(', '));
       notify(`🖼️ 圖片已儲存 — ${ev.label || 'ChatGPT'}`, `${saved.length} 張 → ${dir}`, 'Glass');
     }
     return json(res, 200, { ok: true, saved });

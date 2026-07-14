@@ -17,9 +17,10 @@ const SELECTORS = {
     'button[aria-label*="Stop"]',
     'button[aria-label*="停止"]',
   ],
-  // 生成完成的圖片（ChatGPT 產圖的最終 img 來源多半在 oaiusercontent）
+  // 生成完成的圖片（舊：oaiusercontent CDN；新：自家 backend estuary 端點）
   resultImage: [
     'img[src*="oaiusercontent"]',
+    'img[src*="backend-api/estuary/content"]',
     'img[alt*="Generated image"]',
     'img[alt*="生成的圖片"]',
   ],
@@ -48,9 +49,25 @@ function q(list) {
   return null;
 }
 
+// 產圖時 ChatGPT 常常沒有停止鈕、進度文字也常改版，但有一個藏不住的信號：
+// 畫面上的 img 會一路把 src 從模糊換到清晰。「同一個 img 元素的 src 這一輪
+// 跟上一輪不同」＝有圖正在生成中。每輪輪詢都要呼叫（維持記憶）。
+const imgSrcMemo = new WeakMap();
+function imageChurn() {
+  let churn = false;
+  for (const img of document.images) {
+    const prev = imgSrcMemo.get(img);
+    if (prev !== undefined && prev !== img.src) churn = true;
+    imgSrcMemo.set(img, img.src);
+  }
+  return churn;
+}
+
 function detect() {
+  const churn = imageChurn(); // 先跑：side effect 是記住這一輪所有 img 的 src
   const stop = q(SELECTORS.stopButton);
   if (stop) return { state: 'running', why: 'stopButton: ' + stop.sel };
+  if (churn) return { state: 'running', why: 'imgChurn: 有圖片的 src 正在更換（生成中）' };
   // 停止鈕沒有時，再看有沒有「生成圖片中」的文字（有些階段沒有停止鈕）
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   let n;
@@ -91,34 +108,42 @@ function send(status) {
 }
 
 // ---- 圖片自動下載（方案 B：抓圖交給 background → Hub 落地）----
-// 只掃「最後一則 assistant 回覆」（找不到就退回最後一個對話 turn），
-// 歷史訊息的舊圖不會被撈到；同一張圖去重，done 訊號閃兩次也只送一次。
+// 不依賴訊息容器（一般對話/專案/Canvas 的 DOM 都不同、常改版）：
+// 「閒置時」持續把頁面上現有的大圖記成基準線，done 時掃全頁，
+// 基準線之後新出現的大圖＝這一輪生成的，一張是一張、多張全收。
 // 生成當下 img 的 src 常是 blob:（重新整理後才會變成 oaiusercontent 的正式網址），
 // blob: 只有頁面自己讀得到，所以在這裡直接轉 base64；https 的交給 background 抓。
-function lastAssistantScope() {
-  const msgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
-  if (msgs.length) return msgs[msgs.length - 1];
-  const turns = document.querySelectorAll('article[data-testid*="conversation-turn"], article');
-  return turns.length ? turns[turns.length - 1] : null;
-}
-
-function collectNewImages() {
-  const scope = lastAssistantScope();
-  if (!scope) { log('抓圖：找不到 assistant 訊息容器'); return []; }
-  const srcs = [];
-  for (const img of scope.querySelectorAll('img')) {
+function qualifyingImages() {
+  const out = [];
+  for (const img of document.images) {
     const src = img.src || '';
     const isBlob = src.startsWith('blob:');
-    const isRemote = src.startsWith('https://') && src.includes('oaiusercontent');
-    if (!isBlob && !isRemote) continue;
+    // 舊版出圖走 oaiusercontent CDN；新版（實測 2026-07）走自家 backend：
+    // chatgpt.com/backend-api/estuary/content?id=file_xxx（同源、靠 cookie 授權）
+    const isCdn = src.startsWith('https://') && src.includes('oaiusercontent');
+    const isBackend = src.startsWith(location.origin) && src.includes('/backend-api/estuary/content');
+    if (!isBlob && !isCdn && !isBackend) continue;
     // 避開頭像、icon 之類的小圖
     if (Math.max(img.naturalWidth, img.clientWidth) < 200) continue;
-    const key = isBlob ? src : src.split('?')[0];
-    if (sentImages.has(key)) continue;
-    sentImages.add(key);
-    srcs.push(src);
+    // 去重 key：CDN 圖去掉會輪換的簽名參數；backend 圖以 ?id=file_xxx 為準
+    //（同一張圖會渲染成多個 img 元素、其他參數不同，用全網址會重複下載）
+    let key = src;
+    if (isCdn) {
+      key = src.split('?')[0];
+    } else if (isBackend) {
+      try {
+        key = 'estuary:' + (new URL(src).searchParams.get('id') || src);
+      } catch {}
+    }
+    if (out.some((o) => o.key === key)) continue; // 同張圖的重複渲染只留一份
+    out.push({ src, key });
   }
-  return srcs;
+  return out;
+}
+
+// 閒置時呼叫：把目前可見的大圖標成「已看過」（含捲動載入的歷史訊息、切換的對話）
+function markSeen() {
+  for (const { key } of qualifyingImages()) sentImages.add(key);
 }
 
 async function blobToB64(url) {
@@ -132,27 +157,62 @@ async function blobToB64(url) {
   return { b64: btoa(bin), contentType: blob.type || 'image/png' };
 }
 
+// done 之後不是抓一次就走：ChatGPT 產圖階段常常偵測不到（停止鈕消失、
+// 進度文字對不上），done 會提早發、圖片幾十秒後才出現在 DOM。
+// 所以 done 後開一個觀察窗，窗內每輪輪詢掃描新圖，
+// 新圖連續兩輪 src 相同（漸進式預覽換完、就緒）才送出下載。
+const WATCH_MS = 120000; // 產圖從 done（可能提早發）到圖片上桌可能要一分多鐘，寬一點
+let watchUntil = 0;   // 觀察窗截止時間；0 = 沒在觀察
+let watchPrev = null; // 上一輪看到的候選新圖 src 簽名（等穩定用）
+
 function harvestImages() {
-  // 生成剛結束時 img 的 src 可能還在從漸進預覽換成最終圖，緩 2.5 秒再抓
-  setTimeout(async () => {
-    const srcs = collectNewImages();
-    if (!srcs.length) { log('抓圖：最後一則回覆沒有符合條件的圖片'); return; }
-    const items = [];
-    for (const src of srcs) {
-      if (src.startsWith('blob:')) {
-        try {
-          items.push(await blobToB64(src));
-        } catch (e) {
-          log('抓圖：blob 讀取失敗', src, e);
-        }
-      } else {
-        items.push({ url: src });
+  watchUntil = Date.now() + WATCH_MS;
+  watchPrev = null;
+}
+
+async function sendImages(srcs) {
+  const items = [];
+  for (const src of srcs) {
+    // blob 只有頁面讀得到；同源 backend 圖在頁面抓 cookie 自動帶，一起在這裡轉
+    if (src.startsWith('blob:') || src.startsWith(location.origin)) {
+      try {
+        items.push(await blobToB64(src));
+      } catch (e) {
+        log('抓圖：頁面內讀取失敗', src, e);
       }
+    } else {
+      items.push({ url: src });
     }
-    if (!items.length || !alive()) return;
-    log('偵測到', items.length, '張新圖片，送出下載');
-    chrome.runtime.sendMessage({ type: 'images', items, title: getConvTitle() }).catch(() => {});
-  }, 2500);
+  }
+  if (!items.length || !alive()) return;
+  log('偵測到', items.length, '張新圖片，送出下載');
+  chrome.runtime.sendMessage({ type: 'images', items, title: getConvTitle() })
+    .then((r) => log('下載結果:', r))
+    .catch((e) => log('下載訊息送不出去:', e));
+}
+
+function watchTick() {
+  if (!watchUntil) return;
+  if (Date.now() > watchUntil) {
+    watchUntil = 0;
+    watchPrev = null;
+    // 沒等到新圖：dump 頁面圖片概況，供調 selector 用
+    const dump = [...document.images].slice(0, 20)
+      .map((i) => `${(i.src || '').slice(0, 70)} [${i.naturalWidth}x${i.naturalHeight}]`);
+    log('抓圖：觀察窗結束仍無新圖。頁面 img 概況:', dump);
+    return;
+  }
+  const fresh = qualifyingImages().filter((o) => !sentImages.has(o.key));
+  if (!fresh.length) return;
+  const sig = fresh.map((o) => o.src).sort().join('|');
+  if (watchPrev !== sig) {
+    watchPrev = sig; // 還在變（漸進式預覽），下一輪再看
+    return;
+  }
+  watchUntil = 0;
+  watchPrev = null;
+  fresh.forEach((o) => sentImages.add(o.key));
+  sendImages(fresh.map((o) => o.src));
 }
 
 const poller = setInterval(() => {
@@ -163,6 +223,9 @@ const poller = setInterval(() => {
     return;
   }
   const { state, why } = detect();
+  watchTick(); // done 後的觀察窗：掃描並送出新出現的圖
+  // 完全閒置時持續更新圖片基準線；生成中/觀察窗開著時凍結，免得吃掉新圖
+  if (reported === 'idle' && state === 'idle' && !watchUntil) markSeen();
   if (state === reported) { pending = null; return; }
   if (pending === state) {
     // 連續兩次讀到同一個新狀態 → 確認轉換
@@ -178,4 +241,5 @@ const poller = setInterval(() => {
   }
 }, 1500);
 
-log('content script 已載入，開始輪詢偵測');
+markSeen(); // 開頁時的既有圖片是基準線，只下載之後新生成的
+log('content script 已載入，開始輪詢偵測｜基準線圖片數:', sentImages.size);

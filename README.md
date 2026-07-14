@@ -192,15 +192,16 @@ fetch localhost，會撞 CORS／Local Network Access 限制）。
 
 ```
 content script（done 瞬間 +2.5s）             background                    Hub
-  最後一則 assistant 訊息裡的圖片        ──▶  湊齊 base64            ──▶  POST /images
+  掃全頁，基準線之後新出現的大圖         ──▶  湊齊 base64            ──▶  POST /images
   blob: → 頁面內轉 base64                    （https 的在這裡抓，          寫檔＋🖼️ 通知
   https(oaiusercontent) → 送 URL              帶瀏覽器 cookie）
 ```
 
 設計要點：
 
-- **只掃最後一則 assistant 回覆**（找不到 `data-message-author-role` 時退回最後一個
-  `article` turn），歷史訊息的舊圖不會被誤下載；同張圖去重（https 以去掉簽名參數的
+- **基準線判定，不依賴訊息容器**（一般對話/專案/Canvas 的 DOM 都不同、常改版）：
+  閒置時持續把頁面上現有的大圖標成「已看過」，done 時掃全頁，新出現的才下載——
+  歷史舊圖、捲動載入、切換對話都不會誤觸；同張圖去重（https 以去掉簽名參數的
   URL 為 key），done 訊號抖動也只送一次；**寬度 < 200px 的小圖（頭像/icon）跳過**
 - **產圖當下的 `src` 常是 `blob:`**（重整頁面後才變 `oaiusercontent` 正式網址），
   blob 只有頁面 context 讀得到 → content script 直接轉 base64；https 的則由
