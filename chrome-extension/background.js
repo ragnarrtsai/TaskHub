@@ -4,6 +4,7 @@
 
 const HUB = 'http://localhost:9999/events';
 const HUB_IMAGES = 'http://localhost:9999/images';
+const HUB_FOCUS_WAIT = 'http://localhost:9999/focus/wait';
 const activeTabs = new Set(); // 回報過狀態的 tab，關閉時通知 Hub 移除任務
 
 async function post(body, endpoint = HUB) {
@@ -79,8 +80,46 @@ async function downloadImages(items, title) {
     : `送 Hub 失敗: ${r}`;
 }
 
+// Dashboard 點了 ChatGPT 任務列 → hub 立即回應掛著的長輪詢 → 這裡切到該分頁。
+// 用長輪詢而不是定時輪詢，是因為分頁進背景後 Chrome 會節流計時器（最慢一分鐘一次），
+// 而點擊導向的時機恰恰就是 ChatGPT 在背景的時候。長輪詢 25 秒一循環（< MV3
+// service worker 的 30 秒閒置回收），既是即時推送通道、也順便讓 worker 保持存活。
+async function focusTabs(ids) {
+  for (const id of ids || []) {
+    const m = /#tab(\d+)$/.exec(id); // 任務 id 格式：<profileName>#tab<tabId>
+    if (!m) continue;
+    try {
+      const tab = await chrome.tabs.update(Number(m[1]), { active: true });
+      if (tab) await chrome.windows.update(tab.windowId, { focused: true });
+    } catch {} // 分頁已關就放掉（hub 端 24h 後也會清）
+  }
+}
+
+let waiting = false; // 已經有一條長輪詢掛著就不再開第二條
+async function waitFocusLoop() {
+  if (waiting) return;
+  waiting = true;
+  try {
+    while (true) {
+      const r = await fetch(HUB_FOCUS_WAIT);
+      if (!r.ok) break;
+      await focusTabs((await r.json()).ids);
+    }
+  } catch {} // Hub 沒開／重啟中：先退出，等下面的喚醒訊號再重掛
+  waiting = false;
+}
+waitFocusLoop(); // service worker 每次醒來（任何事件）都會跑到這行，斷線自動接回
+
+// 喚醒訊號其二：每分鐘的鬧鐘，涵蓋「沒有任何 ChatGPT 分頁在動」的死角
+chrome.alarms.create('focus-reconnect', { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener(() => waitFocusLoop());
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !sender.tab) return;
+  if (msg.type === 'focus-poll') {
+    waitFocusLoop(); // 喚醒訊號其一：ChatGPT 分頁的偵測循環順路捎來的
+    return;
+  }
   if (msg.type === 'images' && Array.isArray(msg.items) && msg.items.length) {
     downloadImages(msg.items, msg.title)
       .then(sendResponse)

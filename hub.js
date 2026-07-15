@@ -8,6 +8,8 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const PORT = process.env.TASK_HUB_PORT ? Number(process.env.TASK_HUB_PORT) : 9999;
+// 點擊聚焦時要喚醒的編輯器 app（Claude Code 跑在哪個 app 裡）
+const FOCUS_APP = process.env.TASK_HUB_FOCUS_APP || 'Antigravity';
 const STATE_FILE = path.join(__dirname, 'state.json');
 const STALE_MS = 24 * 60 * 60 * 1000; // 超過 24 小時未更新的任務自動清掉
 
@@ -34,6 +36,20 @@ function saveState() {
   }, 200);
 }
 
+// ChatGPT 分頁的聚焦請求佇列：hub 碰不到瀏覽器，由 Chrome 擴充套件長輪詢取走執行
+let pendingFocus = [];
+let focusWaiters = []; // 掛在 /focus/wait 上等的擴充套件連線
+
+function flushFocusWaiters() {
+  if (!pendingFocus.length || !focusWaiters.length) return;
+  const ids = pendingFocus;
+  pendingFocus = [];
+  for (const w of focusWaiters.splice(0)) {
+    clearTimeout(w.timer);
+    json(w.res, 200, { ids });
+  }
+}
+
 // 音效分級：聽聲音就知道是「做完了」還是「等你決定」
 const STATUS_SOUND = { waiting: 'Funk', done: 'Glass' };
 
@@ -52,7 +68,7 @@ function displayLabel(t) {
   return dup ? `${t.label} #${String(t.id).slice(0, 4)}` : t.label;
 }
 
-function upsertTask({ source, id, label, title, sessionStart, status, prompt, isPrompt, todos, lastResponse, tokens, model }) {
+function upsertTask({ source, id, label, title, sessionStart, status, prompt, isPrompt, todos, lastResponse, tokens, model, cwd }) {
   const key = `${source}:${id}`;
   const now = Date.now();
   const prev = tasks[key];
@@ -90,6 +106,7 @@ function upsertTask({ source, id, label, title, sessionStart, status, prompt, is
     id,
     // label 以 session 首次回報的 cwd 為準（＝在哪裡開的 Claude Code），中途換目錄不改名
     label: (prev && prev.label) || label || id,
+    cwd: cwd || (prev && prev.cwd), // 完整路徑：點擊聚焦視窗用（open -a <app> <cwd>）
     status,
     // 經過時間從「最後一句指令」起算；PostToolUse 之類的活動訊號不重置
     startedAt: (!prev || isPrompt) ? now : prev.startedAt,
@@ -260,7 +277,7 @@ const DASHBOARD_HTML = `<!doctype html>
 <body>
 <h1>AI Task Hub <button id="pip-btn" class="pipbtn" title="開一個永遠置頂的浮動狀態小窗">⧉ 懸浮視窗</button></h1>
 <div id="content">載入中…</div>
-<p class="meta">每秒自動更新 · 資料來源 <code>GET /tasks</code></p>
+<p class="meta">每秒自動更新 · 點任務列跳到該視窗/分頁 · 資料來源 <code>GET /tasks</code></p>
 <script>
 const ICON = { running: '🔵 執行中', waiting: '🟡 待決定', done: '🟢 已完成' };
 let prevStatuses = null; // 上一輪各任務的狀態，用來偵測「有變化」以閃動提示
@@ -392,7 +409,7 @@ async function refresh() {
       '<th class="sortable" data-sort="started">起始時間' + arrow('started') + '</th>' +
       '<th>經過</th>' +
       '<th class="sortable" data-sort="updated">最後更新' + arrow('updated') + '</th></tr>' +
-      tasks.map(t => '<tr draggable="true" data-id="' + esc(t.id) + '"' + (t.status === 'waiting' ? ' class="waiting"' : (flashing(t) ? ' class="flash"' : '')) + '>' +
+      tasks.map(t => '<tr draggable="true" data-id="' + esc(t.id) + '" data-source="' + esc(t.source) + '" title="點一下跳到該視窗/分頁"' + (t.status === 'waiting' ? ' class="waiting"' : (flashing(t) ? ' class="flash"' : '')) + '>' +
         '<td><span class="pin' + (pinnedIds.includes(t.id) ? ' on' : '') + '" data-pin="' + esc(t.id) + '" title="釘選置頂">📌</span> ' +
         '<span class="pin' + (bottomIds.includes(t.id) ? ' on' : '') + '" data-sink="' + esc(t.id) + '" title="沉到最底">⬇️</span>' +
         '</td><td>' + (ICON[t.status] || t.status) +
@@ -420,8 +437,22 @@ content.addEventListener('click', e => {
   const sink = e.target.closest('[data-sink]');
   if (sink) { togglePlace(sink.dataset.sink, bottomIds, pinnedIds); return; }
   const th = e.target.closest('th[data-sort]');
-  if (th) setSort(th.dataset.sort);
+  if (th) { setSort(th.dataset.sort); return; }
+  const row = e.target.closest('tr[data-id]');
+  if (row) focusTask(row.dataset.source, row.dataset.id);
 });
+
+// 點任務列 → 請 hub 導向：claude-code 聚焦編輯器視窗、chatgpt 切到該分頁
+async function focusTask(source, id) {
+  try {
+    const r = await (await fetch('/focus', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, id }),
+    })).json();
+    if (!r.ok) alert(r.error || '無法導向這個任務');
+  } catch { alert('連不上 Hub'); }
+}
 
 // 拖曳調整順序（放開後自動切到「自訂」並存進 localStorage）
 let dragRow = null;
@@ -471,7 +502,7 @@ function renderPip() {
       const title = esc(t.title || t.firstPrompt) || '—';
       const label = esc(t.display || t.label);
       const status = ICON[t.status] || t.status;
-      return '<tr' + (t.status === 'waiting' ? ' class="waiting"' : '') + '><td title="' + status + '">' + (compact ? status.split(' ')[0] : status) +
+      return '<tr data-id="' + esc(t.id) + '" data-source="' + esc(t.source) + '"' + (t.status === 'waiting' ? ' class="waiting"' : '') + '><td title="' + status + '">' + (compact ? status.split(' ')[0] : status) +
         '</td><td title="' + title + '">' + title +
         '</td><td title="' + label + '">' + label +
         '</td><td>' + todo +
@@ -490,11 +521,17 @@ async function openPip() {
     'th,td{text-align:left;padding:.3rem .45rem;border-bottom:1px solid rgba(128,128,128,.3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
     'th{font-size:.7rem;opacity:.6;font-weight:600;}' +
     'tr.waiting td{background:rgba(255,165,0,.25);}' +
+    'tr[data-id]{cursor:pointer;}' +
     '.empty{opacity:.5;text-align:center;padding:1.5rem 0;}';
   pipWin.document.head.appendChild(st);
   const div = pipWin.document.createElement('div');
   div.id = 'pip';
   pipWin.document.body.appendChild(div);
+  // 點一列 → 跳到該視窗/分頁（listener 是主頁面的函式，fetch 走主頁面的 origin）
+  div.addEventListener('click', e => {
+    const row = e.target.closest('tr[data-id]');
+    if (row) focusTask(row.dataset.source, row.dataset.id);
+  });
   pipWin.addEventListener('pagehide', () => { pipWin = null; });
   pipWin.addEventListener('resize', renderPip); // 縮放時即時切換精簡/完整顯示
   renderPip();
@@ -538,6 +575,62 @@ const server = http.createServer(async (req, res) => {
     }
     upsertTask(ev);
     return json(res, 200, { ok: true });
+  }
+
+  // 點擊導向：{source, id} → claude-code 聚焦編輯器視窗；chatgpt 排入佇列等擴充套件切分頁
+  if (req.method === 'POST' && url.pathname === '/focus') {
+    let ev;
+    try {
+      ev = JSON.parse(await readBody(req));
+    } catch {
+      return json(res, 400, { error: 'invalid JSON' });
+    }
+    const t = tasks[`${ev.source}:${ev.id}`];
+    if (!t) return json(res, 404, { ok: false, error: '找不到這筆任務' });
+    if (t.source === 'claude-code') {
+      if (!t.cwd) return json(res, 200, { ok: false, error: '這筆任務還沒有 cwd 紀錄（功能上線前的舊資料），該 session 下次有動靜就會補上' });
+      // open -a：資料夾已開著就聚焦該視窗，沒開才會新開
+      const err = await new Promise((resolve) =>
+        execFile('/usr/bin/open', ['-a', FOCUS_APP, t.cwd], (e) => resolve(e ? String(e.message || e) : null)));
+      if (err) return json(res, 200, { ok: false, error: `open 失敗（編輯器 app 名稱可用環境變數 TASK_HUB_FOCUS_APP 覆寫，目前是 ${FOCUS_APP}）：${err}` });
+      return json(res, 200, { ok: true });
+    }
+    if (t.source === 'chatgpt') {
+      if (!pendingFocus.includes(t.id)) pendingFocus.push(t.id);
+      flushFocusWaiters(); // 擴充套件掛在 /focus/wait 上的話立即推過去
+      return json(res, 200, { ok: true });
+    }
+    return json(res, 200, { ok: false, error: `這個來源（${t.source}）不支援聚焦` });
+  }
+
+  // Chrome 擴充套件輪詢：有沒有待處理的「切到某分頁」請求（取走即清空）
+  if (req.method === 'GET' && url.pathname === '/focus/pending') {
+    const ids = pendingFocus;
+    pendingFocus = [];
+    return json(res, 200, { ids });
+  }
+
+  // Chrome 擴充套件長輪詢：掛著等聚焦請求，一來立即回應；25 秒沒事回空（讓它重掛）。
+  // 25 秒 < MV3 service worker 的 30 秒閒置回收，這條循環同時就是擴充套件的保活心跳。
+  if (req.method === 'GET' && url.pathname === '/focus/wait') {
+    if (pendingFocus.length) {
+      const ids = pendingFocus;
+      pendingFocus = [];
+      return json(res, 200, { ids });
+    }
+    const w = {
+      res,
+      timer: setTimeout(() => {
+        focusWaiters = focusWaiters.filter((x) => x !== w);
+        json(res, 200, { ids: [] });
+      }, 25000),
+    };
+    focusWaiters.push(w);
+    req.on('close', () => {
+      clearTimeout(w.timer);
+      focusWaiters = focusWaiters.filter((x) => x !== w);
+    });
+    return;
   }
 
   // Chrome 擴充套件送來的 ChatGPT 生成圖片：{dir, label, title, images: [{b64, contentType}]}
@@ -637,6 +730,7 @@ const server = http.createServer(async (req, res) => {
       lastResponse,
       tokens,
       model,
+      cwd: hook.cwd,
     });
     return json(res, 200, { ok: true });
   }

@@ -222,6 +222,9 @@ const poller = setInterval(() => {
     log('extension 已重載，此舊 script 停止輪詢（重整分頁即換新版）');
     return;
   }
+  // 順路捅一下 background：長輪詢斷了就重掛（dashboard 點擊導向用；
+  // 分頁進背景後這個 interval 會被節流，所以只當喚醒訊號、不當主通道）
+  chrome.runtime.sendMessage({ type: 'focus-poll' }).catch(() => {});
   const { state, why } = detect();
   watchTick(); // done 後的觀察窗：掃描並送出新出現的圖
   // 完全閒置時持續更新圖片基準線；生成中/觀察窗開著時凍結，免得吃掉新圖
