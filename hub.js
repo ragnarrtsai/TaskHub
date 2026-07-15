@@ -39,6 +39,7 @@ function saveState() {
 // ChatGPT 分頁的聚焦請求佇列：hub 碰不到瀏覽器，由 Chrome 擴充套件長輪詢取走執行
 let pendingFocus = [];
 let focusWaiters = []; // 掛在 /focus/wait 上等的擴充套件連線
+let pickingFolder = false; // 選資料夾視窗一次只開一個
 
 function flushFocusWaiters() {
   if (!pendingFocus.length || !focusWaiters.length) return;
@@ -381,7 +382,7 @@ async function refresh() {
     const el = document.getElementById('content');
     if (!tasks.length) { el.innerHTML = '<p class="empty">目前沒有任務</p>'; lastTasks = []; renderPip(); return; }
     sortTasks(tasks);
-    const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
     const promptCell = t => {
       const ps = (t.prompts && t.prompts.length) ? t.prompts : (t.lastPrompt ? [t.lastPrompt] : []);
       if (!ps.length) return '—';
@@ -490,7 +491,7 @@ function renderPip() {
   if (!pipWin) return;
   const el = pipWin.document.getElementById('pip');
   if (!el) return;
-  const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   if (!lastTasks.length) { el.innerHTML = '<p class="empty">目前沒有任務</p>'; return; }
   // 固定欄寬：狀態/待辦/起始不縮；視窗變窄時由標題、標識吃截斷；再窄的話狀態只留燈號
   const compact = pipWin.innerWidth < 340;
@@ -546,6 +547,13 @@ setInterval(refresh, 1000);
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  // 所有 POST 一律要求 application/json：跨來源網頁的 fetch 帶這個標頭會先觸發
+  // CORS preflight，而本服務不回 CORS 允許標頭 → 瀏覽器把請求整個擋下，
+  // 堵死「惡意網頁 drive-by 打 localhost」這條路（text/plain 屬簡單請求、會直達）。
+  if (req.method === 'POST' && !/^application\/json\b/i.test(req.headers['content-type'] || '')) {
+    return json(res, 415, { error: 'Content-Type 必須是 application/json' });
+  }
 
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/dashboard')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -685,6 +693,20 @@ const server = http.createServer(async (req, res) => {
       notify(`🖼️ 圖片已儲存 — ${ev.label || 'ChatGPT'}`, `${saved.length} 張 → ${dir}`, 'Glass');
     }
     return json(res, 200, { ok: true, saved });
+  }
+
+  // 原生 macOS「選資料夾」對話視窗（擴充套件選項頁的「瀏覽…」用），回傳絕對路徑。
+  // 交給 System Events 開才會浮到最前面（hub 是背景程序，自己開會沉在別的視窗後）。
+  if (req.method === 'POST' && url.pathname === '/pick-folder') {
+    if (pickingFolder) return json(res, 409, { ok: false, error: '已經有一個選資料夾視窗開著' });
+    pickingFolder = true;
+    const script = 'tell application "System Events"\nactivate\nreturn POSIX path of (choose folder with prompt "選擇 ChatGPT 圖片的儲存資料夾")\nend tell';
+    const out = await new Promise((resolve) =>
+      execFile('/usr/bin/osascript', ['-e', script], { timeout: 300000 }, (e, stdout) => resolve(e ? null : stdout.trim())));
+    pickingFolder = false;
+    if (!out) return json(res, 200, { ok: false, cancelled: true }); // 按取消（或 5 分鐘沒動作）
+    const picked = out.length > 1 ? out.replace(/\/+$/, '') : out; // 去掉尾端斜線，根目錄除外
+    return json(res, 200, { ok: true, path: picked });
   }
 
   // Claude Code hooks 專用：直接吃 hook stdin 的原始 JSON

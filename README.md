@@ -86,6 +86,12 @@ tail -f ~/projects/task-hub/hub.log
 | `POST /focus` | 點擊導向 `{source, id}`。claude-code 來源：`open -a <app> <cwd>` 聚焦該專案的編輯器視窗（app 預設 `Antigravity`，可用環境變數 `TASK_HUB_FOCUS_APP` 覆寫；只能到視窗層級，進不到編輯器內的分頁）。chatgpt 來源：立即推給掛在 `/focus/wait` 上的擴充套件、精準切到該分頁。cwd 是功能上線後才開始記錄的，舊任務會回「還沒有 cwd 紀錄」 |
 | `GET /focus/wait` | Chrome 擴充套件長輪詢：掛著等 ChatGPT 分頁聚焦請求，一來立即回應（取走即清空），25 秒沒事回空讓它重掛 |
 | `GET /focus/pending` | 同上的一次性版本（立即回傳並清空佇列），擴充套件已改用 `/focus/wait`，留著當除錯工具 |
+| `POST /pick-folder` | 開原生 macOS「選資料夾」視窗（經 System Events 帶到最前面），回傳 `{ok, path}`；取消回 `{cancelled: true}`。給擴充套件選項頁的「瀏覽…」用，一次只開一個（撞到回 409），5 分鐘沒動作自動收 |
+
+所有 POST 端點**強制要求 `Content-Type: application/json`**（415 退回）：跨來源網頁的
+fetch 帶這個標頭會觸發 CORS preflight、而 Hub 不回 CORS 允許 → 瀏覽器整包擋下，
+堵死「惡意網頁 drive-by 打 localhost」（`text/plain` 屬簡單請求、原本會直達）。
+本機程式（hooks 的 curl、擴充套件）都已帶標頭，不受影響。
 
 ---
 
@@ -102,7 +108,7 @@ tail -f ~/projects/task-hub/hub.log
 
 ```json
 "hooks": {
-  "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "curl -s -m 2 -X POST http://localhost:9999/claude-hook --data-binary @- >/dev/null 2>&1 || true", "timeout": 5, "async": true }] }],
+  "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "curl -s -m 2 -X POST -H 'Content-Type: application/json' http://localhost:9999/claude-hook --data-binary @- >/dev/null 2>&1 || true", "timeout": 5, "async": true }] }],
   "PostToolUse":       [{ "hooks": [{ "type": "command", "command": "（同上）", "timeout": 5, "async": true }] }],
   "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "（同上）", "timeout": 5, "async": true }] }],
   "Stop":              [{ "hooks": [{ "type": "command", "command": "（同上）", "timeout": 5, "async": true }] }],
@@ -204,7 +210,9 @@ tab id），實測點擊到切換約 30ms。
 
 ### 圖片自動下載
 
-在「擴充功能選項」設定**儲存資料夾**（`/` 或 `~/` 開頭，選項頁儲存時會驗證格式）後啟用；留空 = 關閉。流程：
+在「擴充功能選項」設定**儲存資料夾**後啟用；留空 = 關閉。可按「**瀏覽…**」開
+原生選資料夾視窗（經 Hub 的 `/pick-folder`；瀏覽器自己的選擇器故意不給絕對路徑，
+所以繞道本機 Hub），或手動填 `/`、`~/` 開頭的路徑（儲存時會驗證格式）。流程：
 
 ```
 content script（done 後 120s 觀察窗）          background                    Hub
